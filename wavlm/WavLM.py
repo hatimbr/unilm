@@ -320,9 +320,36 @@ class WavLM(nn.Module):
         padding_mask = padding_mask.all(-1)
         return padding_mask
 
+    def get_features(self, source: torch.Tensor | List[torch.Tensor]):
+        if not isinstance(source, list):
+            source = [source]
+
+        feat_list = []
+        for tens in source:
+            if tens.ndim == 1:
+                tens = tens.reshape(1, -1)
+
+            if self.feature_grad_mult > 0:
+                tens = self.feature_extractor(tens)
+                if self.feature_grad_mult != 1.0:
+                    tens = GradMultiply.apply(tens, self.feature_grad_mult)
+            else:
+                with torch.no_grad():
+                    tens = self.feature_extractor(tens)
+
+            tens = tens.transpose(1, 2)
+            tens = self.layer_norm(tens)[0]
+            feat_list.append(tens)
+
+        features = torch.nn.utils.rnn.pad_sequence(
+            feat_list, batch_first=True
+        )
+        padding_mask = (features == 0.).to(dtype=torch.int)
+        return features, padding_mask
+
     def extract_features(
         self,
-        source: torch.Tensor,
+        source: torch.Tensor | List[torch.Tensor],
         padding_mask: Optional[torch.Tensor] = None,
         mask: bool = False,
         ret_conv: bool = False,
@@ -330,16 +357,7 @@ class WavLM(nn.Module):
         ret_layer_results: bool = False,
     ):
 
-        if self.feature_grad_mult > 0:
-            features = self.feature_extractor(source)
-            if self.feature_grad_mult != 1.0:
-                features = GradMultiply.apply(features, self.feature_grad_mult)
-        else:
-            with torch.no_grad():
-                features = self.feature_extractor(source)
-
-        features = features.transpose(1, 2)
-        features = self.layer_norm(features)
+        features, padding_mask = self.get_features(source)
 
         if padding_mask is not None:
             padding_mask = self.forward_padding_mask(features, padding_mask)
